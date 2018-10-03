@@ -269,6 +269,7 @@ function usage
     echo -e "\t mkdir    <REMOTE_DIR>"
     echo -e "\t list     [REMOTE_DIR]"
     echo -e "\t monitor  [REMOTE_DIR] [TIMEOUT]"
+    echo -e "\t sync     [REMOTE_DIR] [LOCAL_DIR]"
     echo -e "\t share    <REMOTE_FILE>"
     echo -e "\t saveurl  <URL> <REMOTE_DIR>"
     echo -e "\t search   <QUERY>"
@@ -1323,6 +1324,97 @@ function db_monitor
     done
 }
 
+#Longpoll remote directory only once
+#$1 = Remote source dir
+#$2 = Local destination dir
+function db_sync_monitor_nonblock
+{
+    local TIMEOUT=60
+    local DIR_SRC=$(normalize_path "$1")
+
+    if [[ "$DIR_SRC" == "/" ]]; then
+        DIR_SRC=""
+    fi
+
+    $CURL_BIN $CURL_ACCEPT_CERTIFICATES -X POST -L -s --show-error --globoff -i -o "$RESPONSE_FILE" --header "Authorization: Bearer $OAUTH_ACCESS_TOKEN" --header "Content-Type: application/json" --data "{\"path\": \"$DIR_SRC\",\"include_media_info\": false,\"include_deleted\": false,\"include_has_explicit_shared_members\": false}" "$API_LIST_FOLDER_URL" 2> /dev/null
+    check_http_response
+
+    if grep -q "^HTTP/1.1 200 OK" "$RESPONSE_FILE"; then
+
+        local CURSOR=$(sed -n 's/.*"cursor": *"\([^"]*\)".*/\1/p' "$RESPONSE_FILE")
+
+        $CURL_BIN $CURL_ACCEPT_CERTIFICATES -X POST -L -s --show-error --globoff -i -o "$RESPONSE_FILE" --header "Content-Type: application/json" --data "{\"cursor\": \"$CURSOR\",\"timeout\": ${TIMEOUT}}" "$API_LONGPOLL_FOLDER" 2> /dev/null
+        check_http_response
+
+        if grep -q "^HTTP/1.1 200 OK" "$RESPONSE_FILE"; then
+            local CHANGES=$(sed -n 's/.*"changes" *: *\([a-z]*\).*/\1/p' "$RESPONSE_FILE")
+        else
+            ERROR_MSG=$(grep "Error in call" "$RESPONSE_FILE")
+            print "FAILED to longpoll (http error): $ERROR_MSG\n"
+            ERROR_STATUS=1
+            return 1
+        fi
+
+        if [[ -z "$CHANGES" ]]; then
+            print "FAILED to longpoll (unexpected response)\n"
+            ERROR_STATUS=1
+            return 1
+        fi
+
+        if [ "$CHANGES" == "true" ]; then
+
+            OUT_FILE=$(db_list_outfile "$DIR_SRC" "$CURSOR")
+
+            if [ -z "$OUT_FILE" ]; then
+                print "FAILED to list changes\n"
+                ERROR_STATUS=1
+                return
+            fi
+
+            #For each entry, printing directories...
+            while read -r line; do
+
+                local FILE=${line%:*}
+                local META=${line##*:}
+                local TYPE=${META%;*}
+                local SIZE=${META#*;}
+
+                #Removing unneeded /
+                FILE=${FILE##*/}
+
+                if [[ $TYPE == "folder" ]]; then
+                    FILE=$(echo -e "$FILE")
+                    $PRINTF " [D] %s\n" "$FILE"
+                elif [[ $TYPE == "file" ]]; then
+                    FILE=$(echo -e "$FILE")
+                    $PRINTF " [F] %s %s\n" "$SIZE" "$FILE"
+                elif [[ $TYPE == "deleted" ]]; then
+                    FILE=$(echo -e "$FILE")
+                    $PRINTF " [-] %s\n" "$FILE"
+                fi
+
+            done < "$OUT_FILE"
+
+            rm -fr "$OUT_FILE"
+        fi
+
+    else
+        ERROR_STATUS=1
+        return 1
+    fi
+
+}
+
+#Longpoll continuously remote directory for syncing
+#$1 = Remote source dir
+#$2 = Local destination dir
+function db_sync
+{
+    while (true); do
+        db_sync_monitor_nonblock "$1" "$2"
+    done
+}
+
 #Share remote file
 #$1 = Remote file
 function db_share
@@ -1733,6 +1825,21 @@ case $COMMAND in
         else
             db_monitor 60 "/$DIR_DST"
         fi
+
+    ;;
+
+    sync)
+
+        if [[ $argnum -lt 1 ]]; then
+            usage
+        fi
+
+        FILE_SRC="$ARG1"
+        FILE_DST="$ARG2"
+
+        print " > Syncing \"$FILE_SRC\" for changes...\n"
+
+        db_sync "/$FILE_SRC" "$FILE_DST"
 
     ;;
 
