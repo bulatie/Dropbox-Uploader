@@ -1331,6 +1331,7 @@ function db_sync_monitor_nonblock
 {
     local TIMEOUT=60
     local DIR_SRC=$(normalize_path "$1")
+    local DIR_DST=$(normalize_path "$2")
 
     if [[ "$DIR_SRC" == "/" ]]; then
         DIR_SRC=""
@@ -1396,6 +1397,9 @@ function db_sync_monitor_nonblock
             done < "$OUT_FILE"
 
             rm -fr "$OUT_FILE"
+            rm -fr "$DIR_DST"
+            db_download "$1" "$2"
+            echo "montioring continouusly ..."
         fi
 
     else
